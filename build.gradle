@@ -29,8 +29,6 @@ dependencies {
 
     implementation 'org.springframework.boot:spring-boot-starter-batch'
     implementation 'com.google.code.gson:gson:2.8.6'
-    implementation 'com.nimbusds:nimbus-jose-jwt:8.9'
-    implementation 'com.googlecode.libphonenumber:libphonenumber:8.11.5'
     implementation 'com.squareup.okhttp3:okhttp:4.4.0'
     implementation 'com.googlecode.log4jdbc:log4jdbc:1.2'
 
@@ -41,9 +39,6 @@ dependencies {
     implementation 'org.springdoc:springdoc-openapi-ui:1.6.9'
     implementation 'org.springdoc:springdoc-openapi-data-rest:1.6.9'
     implementation 'org.reflections:reflections:0.10.2'
-
-    // Spring Boot
-    implementation 'org.springframework.boot:spring-boot-starter-web'
 
     // Logging configuration
     configurations {
