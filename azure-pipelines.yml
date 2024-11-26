@@ -1,0 +1,96 @@
+pool:
+  vmImage: 'ubuntu-24.04'
+
+variables:
+  MAVEN_CACHE_FOLDER: $(Pipeline.Workspace)/.m2/repository
+  MAVEN_OPTS: '-Dmaven.repo.local=$(MAVEN_CACHE_FOLDER)'
+  containerRegistryServiceConnection: $(IMAGE_GROUP)
+  imageRepository: $(IMAGE_REPO_NAME)
+  GIT_COMMIT: $(Build.SourceVersion)
+  tag: latest
+  MY_PAT: $(PAT)
+  isSonar: $[eq(variables.IS_SONAR, 'true')]
+
+jobs:
+  - job: SonarBuild
+    condition: eq(variables.IsSonar, 'true')
+    steps:
+      - script: |
+          apt-get install jq -y
+          echo Sonarqube analysis...
+          chmod +x ./gradlew
+          ./gradlew sonar -Dsonar.host.url=${SONAR_HOST_URL} -Dsonar.projectKey=$PROJECT_KEY -Dsonar.projectName=$PROJECT_KEY -Dsonar.token=$SONAR_TOKEN
+          sleep 60
+          curl -u ${SONAR_ID}:${SONAR_PWD} ${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY} >result.json
+          if [ $(jq -r '.projectStatus.status' result.json) = ERROR ] ; then CODEBUILD_BUILD_SUCCEEDING = 0 ; fi
+          echo Code scan completed on `date`
+          if [ $CODEBUILD_BUILD_SUCCEEDING -eq 0 ]; then exit 1; fi
+          set -x
+        displayName: Sonarqube Analysis
+  - job: Build
+    dependsOn:
+      - SonarBuild
+    condition: or(succeeded('SonarBuild'), eq(variables.IsSonar, 'false'))
+    steps:
+      - script: |
+          echo $sourceVersion
+          commitHash=${sourceVersion:0:7}
+          echo $commitHash
+          echo "##vso[task.setvariable variable=commitHash]$commitHash"
+        env: { sourceVersion: $(Build.SourceVersion) }
+        displayName: Git Hash
+
+      - script: |
+          echo Kubectl download...
+          curl -o kubectl https://amazon-eks.s3-us-west-2.amazonaws.com/1.21.2/2021-07-05/bin/linux/amd64/kubectl
+          chmod +x ./kubectl
+          mv ./kubectl /usr/local/bin/kubectl
+          mkdir ~/.kube
+          mkdir -p logs
+          echo Helm download...
+          curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > get_helm.sh
+          chmod 700 get_helm.sh
+          ./get_helm.sh
+          echo ArgoCD download...
+          curl -H s3://turaco-cli  https://turaco-curl.s3.ap-northeast-2.amazonaws.com/argocd/argocd -o argocd
+          chmod +x argocd
+          chmod +x ./gradlew
+          curl -L https://aka.ms/acr/installaad/bash | /bin/bash
+          mv argocd /usr/local/bin/argocd
+        displayName: Download ENV...
+
+      - task: Bash@3
+        displayName: Docker Build & Push
+        inputs:
+          targetType: 'inline'
+          script: |
+            echo Building with gradle...
+            ./gradlew clean build jib -PspringProfile=$SPRING_PROFILES_ACTIVE -PdockerRegistry=$IMAGE_REPO_NAME -PdockerUser=$CLIENT_ID -PdockerPassword=$CLIENT_SECRET -PserviceName=$ARGO_APPLICATION -PcommitRev=$COMMIT_ID
+      - script: |
+          B64_PAT=$(printf "%s"":$MY_PAT" | base64)
+          if [[ ! -d ${GROUP_NAME}_HelmChart ]] ; then
+            git -c http.extraHeader="AUTHORIZATION: Basic ${B64_PAT}" clone https://${ORGANIZATION}@dev.azure.com/${ORGANIZATION}/${PROJECT}/_git/${GROUP_NAME}_HelmChart
+            cd ${GROUP_NAME}_HelmChart/${STAGE_NAME}/${SERVICE_NAME}
+          else
+            cd ${GROUP_NAME}_HelmChart/${STAGE_NAME}/${SERVICE_NAME}
+            git pull origin master
+          fi
+          find . -name values.yaml -type f -exec sed -i 's/^\(\s*tag\s*:\s*\).*/\1'${ARGO_APPLICATION}-$(commitHash)'/' {} \;
+          git config --global user.email "info@twolinecode.com"
+          git config --global user.name "azure-Repos-runner"
+          git add ./values.yaml
+          git commit --allow-empty -m "Pushed Helm Chart:${ARGO_APPLICATION}-$(commitHash)"
+          git -c http.extraHeader="AUTHORIZATION: Basic ${B64_PAT}" push origin master
+        displayName: Update Helm Chart with Git
+
+      - script: |
+          echo Apply k8s...
+          cd ${GROUP_NAME}_HelmChart/${STAGE_NAME}/${SERVICE_NAME}
+          helm template ../Common > common.yaml
+          kubectl --kubeconfig ../${KUBECONFIG} apply -f common.yaml
+          ENDPOINT=$(kubectl --kubeconfig ../${KUBECONFIG} get ing -n tlc-support argocd-server-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          PASSWORD=$(kubectl --kubeconfig ../${KUBECONFIG} get secret argocd-initial-admin-secret -n tlc-support -o jsonpath='{.data.password}' | base64 -d)
+          echo y | argocd login $ENDPOINT --grpc-web-root-path argocd --username admin --password $PASSWORD
+          argocd app get ${ARGO_APPLICATION} --refresh
+          argocd app sync ${ARGO_APPLICATION}
+        displayName: Deploy with Helm Chart

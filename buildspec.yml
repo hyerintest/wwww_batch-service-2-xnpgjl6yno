@@ -1,0 +1,72 @@
+version: 0.2
+env:
+  git-credential-helper: yes
+phases:
+  install:
+    runtime-versions:
+      java: corretto17
+    commands:
+      - curl -o kubectl https://amazon-eks.s3-us-west-2.amazonaws.com/1.21.2/2021-07-05/bin/linux/amd64/kubectl
+      - chmod +x ./kubectl
+      - mv ./kubectl /usr/local/bin/kubectl
+      - mkdir ~/.kube
+      - curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 > get_helm.sh
+      - chmod 700 get_helm.sh
+      - ./get_helm.sh
+      - curl -H s3://turaco-cli  https://turaco-curl.s3.ap-northeast-2.amazonaws.com/argocd/argocd -o argocd
+      - chmod +x argocd
+      - chmod +x ./gradlew
+      - mv argocd /usr/local/bin/argocd
+  pre_build:
+    on-failure: ABORT
+    commands:
+      - aws --version
+      - echo Logging in to Amazon ECR...
+  build:
+    on-failure: ABORT
+    commands:
+      - echo Building with mvn...
+      - COMMIT_ID=${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}
+      - mkdir -p logs
+      - ./gradlew clean build -PspringProfile=$SPRING_PROFILES_ACTIVE jib -PdockerRegistry=$IMAGE_REPO_NAME -PserviceName=$ARGO_APPLICATION -PcommitRev=$COMMIT_ID
+  post_build:
+    on-failure: ABORT
+    commands:
+      - |
+        if [[ ! -d ${GROUP_NAME}_HelmChart ]] ; then
+          git clone https://git-codecommit.${SOURCE_REGION}.amazonaws.com/v1/repos/${GROUP_NAME}_HelmChart
+          cd ${GROUP_NAME}_HelmChart/${STAGE_NAME}/${SERVICE_NAME}
+        else
+          cd ${GROUP_NAME}_HelmChart/${STAGE_NAME}/${SERVICE_NAME}
+          git pull origin master
+        fi
+      - COMMIT_ID=${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}
+      - find . -name values.yaml -type f -exec sed -i 's/^\(\s*tag\s*:\s*\).*/\1'$ARGO_APPLICATION-$COMMIT_ID'/' {} \;
+      - git config --global user.email "info@twolinecode.com"
+      - git config --global user.name "codecommit-runner"
+      - git add ./values.yaml
+      - git commit --allow-empty -m "Pushed Helm Chart:$ARGO_APPLICATION-$COMMIT_ID"
+      - |
+        while :
+        do
+          git pull --rebase origin master
+          if git push origin master
+          then
+            break
+          fi
+        done
+      - echo Apply k8s...
+      - helm template ../Common > common.yaml
+      - aws configure set aws_access_key_id ${ACCESS_KEY}
+      - aws configure set aws_secret_access_key ${SECRET_KEY}
+      - aws configure set output json
+      - aws configure set region ${CLUSTER_REGION}
+      - kubectl --kubeconfig ../${KUBECONFIG} apply -f common.yaml
+      - ENDPOINT=$(kubectl --kubeconfig ../${KUBECONFIG} get ing -n tlc-support -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
+      - PASSWORD=$(kubectl --kubeconfig ../${KUBECONFIG} get secret argocd-initial-admin-secret -n tlc-support -o jsonpath='{.data.password}' | base64 -d)
+      - echo y | argocd login $ENDPOINT --grpc-web-root-path argocd --username admin --password $PASSWORD
+      - argocd app get ${ARGO_APPLICATION} --refresh
+      - argocd app sync ${ARGO_APPLICATION}
+cache:
+  paths:
+    - '/root/.m2/**/*'

@@ -1,0 +1,126 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '2.7.0'
+    id "org.sonarqube" version "4.4.1.3373"
+    id 'io.spring.dependency-management' version '1.0.11.RELEASE'
+    id "com.google.cloud.tools.jib" version "3.3.1"
+}
+
+group = 'com.tlc.test'
+version = '0.0.1'
+sourceCompatibility = '1.8'
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    finalName = 'batch-service-2-xnpgjl6yno'
+
+    springProfile = project.hasProperty('springProfile') ? project.getProperty('springProfile') : 'default'
+    dockerRegistry = project.hasProperty('dockerRegistry') ? project.getProperty('dockerRegistry') : 'default'
+    dockerUser = project.hasProperty('dockerUser') ? project.getProperty('dockerUser') : 'default'
+    dockerPassword = project.hasProperty('dockerPassword') ? project.getProperty('dockerPassword') : 'default'
+    commitRev = project.hasProperty('commitRev') ? project.getProperty('commitRev') : 'latest'
+    serviceName = project.hasProperty('serviceName') ? project.getProperty('serviceName') : 'default'
+}
+
+dependencies {
+
+    implementation 'org.springframework.boot:spring-boot-starter-batch'
+    implementation 'com.google.code.gson:gson:2.8.6'
+    implementation 'com.nimbusds:nimbus-jose-jwt:8.9'
+    implementation 'com.googlecode.libphonenumber:libphonenumber:8.11.5'
+    implementation 'com.squareup.okhttp3:okhttp:4.4.0'
+    implementation 'com.googlecode.log4jdbc:log4jdbc:1.2'
+
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+
+    // Swagger
+    implementation 'org.springdoc:springdoc-openapi-ui:1.6.9'
+    implementation 'org.springdoc:springdoc-openapi-data-rest:1.6.9'
+    implementation 'org.reflections:reflections:0.10.2'
+
+    // Spring Boot
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+
+    // Logging configuration
+    configurations {
+        all*.exclude module: 'spring-boot-starter-logging'
+    }
+    implementation 'org.springframework.boot:spring-boot-starter-log4j2'
+
+    // Other dependencies
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+
+    implementation 'org.json:json:20210307'
+    implementation 'org.assertj:assertj-core:3.24.2'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}
+
+dependencyManagement {
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+// Test task configuration
+test {
+    useJUnitPlatform()
+    reports {
+        junitXml {
+            required.set(true) // Enable JUnit XML report
+            outputLocation.set(file("${buildDir}/test-results")) // Set the output directory
+        }
+        html {
+            required.set(true) // Enable HTML report
+        }
+    }
+    testLogging {
+        events "passed", "skipped", "failed"
+    }
+}
+
+sonarqube {
+    properties {
+        property 'sonar.projectKey', 'your_project_key'
+        property 'sonar.sourceEncoding', 'UTF-8'
+        property 'sonar.tests', '' // 테스트 파일을 분석에서 제외
+        property 'sonar.exclusions', 'src/test/**' // 테스트 디렉토리 전체를 제외
+        property 'sonar.java.binaries', file("${buildDir}/classes/java/main").absolutePath
+    }
+}
+
+
+jib {
+    from {
+        image = "registry.turacocloud.com/turaco-package/openjdk:8-alpine"
+    }
+    to {
+        image = "${dockerRegistry}"
+        if ("${dockerUser}" == ('default')) {
+            credHelper = 'ecr-login'
+        } else {
+            auth {
+                username = "${dockerUser}"
+                password = "${dockerPassword}"
+            }
+        }
+        tags = ["${serviceName}-${commitRev}", "${serviceName}-latest"]
+    }
+    extraDirectories {
+        paths = 'logs'
+    }
+
+    container {
+        jvmFlags = [
+                "-Djava.security.egd=file:/dev/./urandom".toString(),
+                '-Dspring.profiles.active=' + (springProfile ?: 'default')
+        ]
+        volumes = ['/tmp', '/logs']
+    }
+}
